@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Налаштування GBK (936) для старих програм у Windows</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", Arial, sans-serif;
+      line-height: 1.55;
+      color: #202124;
+      background: #f5f7fa;
+    }
+    body {
+      box-sizing: border-box;
+      max-width: 860px;
+      margin: 32px auto;
+      padding: 0 22px 40px;
+    }
+    main {
+      padding: 28px 34px;
+      background: #fff;
+      border: 1px solid #dfe3e8;
+      border-radius: 10px;
+      box-shadow: 0 3px 14px #18223012;
+    }
+    h1, h2 { line-height: 1.25; }
+    h1 { margin-top: 0; color: #183153; }
+    h2 { margin-top: 1.8em; color: #23476b; font-size: 1.2rem; }
+    code {
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: #eef2f6;
+      font-family: Consolas, monospace;
+    }
+    pre {
+      overflow-x: auto;
+      padding: 14px 16px;
+      border-radius: 6px;
+      background: #17212b;
+      color: #f1f5f9;
+      font-size: .92rem;
+    }
+    .note {
+      padding: 12px 16px;
+      border-left: 4px solid #2878b5;
+      background: #edf6fc;
+    }
+    .warning {
+      padding: 12px 16px;
+      border-left: 4px solid #c47b00;
+      background: #fff7e6;
+    }
+    li { margin: .45em 0; }
+    @media (max-width: 600px) {
+      body { margin: 16px auto; padding: 0 12px 24px; }
+      main { padding: 20px 18px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>GBK (code page 936) для старих програм у Windows</h1>
+  <p>Ці кроки налаштовують системну локаль для старих не-Unicode програм, зокрема рушія Angelica, який обробляє шляхи через ANSI <code>char*</code>.</p>
+
+  <div class="note">
+    <strong>Мова інтерфейсу Windows не зміниться.</strong>
+    Системна локаль для не-Unicode програм окрема від мови меню та вікон Windows.
+    Зміна впливає на всі старі програми, які використовують системну ANSI-кодову сторінку.
+  </div>
+
+  <h2>1. Змініть системну локаль для старих програм</h2>
+  <ol>
+    <li>Відкрийте меню «Пуск», знайдіть і запустіть <strong>Панель керування</strong>.</li>
+    <li>Відкрийте <strong>Годинник і регіон → Регіон</strong> (або натисніть <code>Win+R</code>, введіть <code>intl.cpl</code> і натисніть Enter).</li>
+    <li>Відкрийте вкладку <strong>Адміністративні</strong>.</li>
+    <li>Натисніть <strong>Змінити мову системи…</strong> / <strong>Change system locale…</strong>.</li>
+    <li>Виберіть <strong>Chinese (Simplified, China)</strong> / <strong>Китайська (спрощена, Китай)</strong>.</li>
+    <li>Якщо встановлено прапорець <strong>Beta: Use Unicode UTF-8 for worldwide language support</strong>, зніміть його. Для цієї перевірки потрібен ACP 936, а не UTF-8 65001.</li>
+    <li>Підтвердьте зміни та перезавантажте комп’ютер, якщо Windows цього попросить.</li>
+  </ol>
+
+  <h2>2. Перевірте налаштування після перезавантаження</h2>
+  <p>Відкрийте PowerShell і виконайте:</p>
+  <pre><code>Get-WinSystemLocale
+Get-Culture
+
+Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class Win32LocaleCheck {
+    [DllImport("kernel32.dll")]
+    public static extern uint GetACP();
+}
+'@
+[Win32LocaleCheck]::GetACP()</code></pre>
+  <ul>
+    <li><code>Get-WinSystemLocale</code> має показати <code>zh-CN</code> або китайську локаль із code page 936.</li>
+    <li><code>Get-Culture</code> показує культуру саме поточного процесу/користувача. Вона може бути, наприклад, <code>uk-UA</code> і не є доказом активного системного ACP.</li>
+    <li>Остання команда викликає Windows API <code>GetACP</code>. Для цілі цього проєкту результат має бути <code>936</code>.</li>
+  </ul>
+
+  <div class="warning">
+    <strong>Важливо:</strong> результат <code>Get-Culture</code> та <code>[System.Text.Encoding]::Default.CodePage</code>
+    залежить від процесу й версії PowerShell/.NET. Використовуйте <code>GetACP</code> як пряму перевірку системної ANSI-кодової сторінки.
+  </div>
+
+  <h2>3. За потреби змініть формат регіону окремо</h2>
+  <p>Якщо потрібне саме значення культури PowerShell <code>zh-CN</code>, відкрийте <strong>Параметри → Час і мова → Мова й регіон → Регіональний формат</strong> і виберіть китайський формат, наприклад <strong>Chinese (Simplified, China)</strong>. Це налаштування форматів дат/чисел; воно <strong>не замінює</strong> системну локаль для старих програм і не встановлює ACP 936.</p>
+
+  <h2>4. Повторіть перевірку GFX</h2>
+  <p>Після того як <code>GetACP</code> повертає <code>936</code>, запустіть preview знову. Наприклад:</p>
+  <pre><code>GFXAngelica2.2Checker.exe --preview --root "B:\Git\PW146RUUnpackedAssets" --gfx "gfx\npc\example.gfx"</code></pre>
+  <p>Якщо ACP дорівнює 936, але файл усе одно не завантажується, причина може бути в самому GFX або його залежностях; правильна локаль сама по собі не гарантує успішний рендер.</p>
+</main>
+</body>
+</html>

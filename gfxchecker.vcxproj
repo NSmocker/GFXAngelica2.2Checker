@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{D2F3128D-3CA8-465C-B72F-8585E095C9A9}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>GfxChecker</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <ClientSourceRoot Condition="'$(ClientSourceRoot)'==''">B:\Git\PW_ClientSource</ClientSourceRoot>
+    <DirectXSdkRoot Condition="'$(DirectXSdkRoot)'==''">$(ClientSourceRoot)\DXSDK</DirectXSdkRoot>
+    <DxPlatform Condition="'$(Platform)'=='Win32'">x86</DxPlatform>
+    <DxPlatform Condition="'$(Platform)'=='x64'">x64</DxPlatform>
+    <OutDir>$(MSBuildProjectDirectory)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildProjectDirectory)\build\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>GFXAngelica2.2Checker</TargetName>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ConformanceMode>false</ConformanceMode>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <PreprocessorDefinitions>WIN32;_WINDOWS;_CONSOLE;DX9;ANGELICA_2_2;UNICODE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\third_party\imgui;$(ClientSourceRoot)\SDK\AngelicaCommon\header;$(ClientSourceRoot)\SDK\AngelicaFile\header;$(ClientSourceRoot)\SDK\Angelica3D\Header;$(ClientSourceRoot)\SDK\AngelicaMedia\header;$(ClientSourceRoot)\SDK\ImmWrapper\header;$(ClientSourceRoot)\SDK\Include;$(ClientSourceRoot)\client\CElement\include\GfxCommon;$(WindowsSDK_IncludePath);$(DirectXSdkRoot)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <OptimizeReferences>true</OptimizeReferences>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <AdditionalLibraryDirectories>$(ClientSourceRoot)\SDK\lib\$(Platform)\$(Configuration);$(ClientSourceRoot)\SDK\3rdSDK\lib\$(Platform)\$(Configuration);$(DirectXSdkRoot)\Lib\$(DxPlatform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>AngelicaCommon.lib;AngelicaFile.lib;AngelicaMedia.lib;Angelica3D.lib;GfxCommon.lib;AudioEngine.lib;FWEditor.lib;LuaWrapper.lib;ElementSkill.lib;ImmWrapper.lib;AUInterface.lib;CHBasedCD.lib;FTDriver.lib;AutoMoveImp.lib;SpeedTreeRT.lib;mpg123lib.lib;ImageCacheLib.lib;ogg_static.lib;vorbis_static.lib;vorbisfile_static.lib;strmbase.lib;async.lib;lua5.1.lib;zlibwapi.lib;zlib.lib;d3d9.lib;d3dx9.lib;dxguid.lib;windowscodecs.lib;ole32.lib;shell32.lib;dsound.lib;winmm.lib;ws2_32.lib;wininet.lib;shlwapi.lib;psapi.lib;imm32.lib;ddraw.lib;version.lib;imagehlp.lib;glu32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ImageHasSafeExceptionHandlers Condition="'$(Platform)'=='Win32'">false</ImageHasSafeExceptionHandlers>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\CheckerLog.cpp" />
+    <ClCompile Include="src\EngineProbe.cpp" />
+    <ClCompile Include="src\ClientCompat.cpp" />
+    <ClCompile Include="src\GfxListReader.cpp" />
+    <ClCompile Include="src\OrbitCamera.cpp" />
+    <ClCompile Include="src\PreviewOverlay.cpp" />
+    <ClCompile Include="third_party\imgui\imgui.cpp" />
+    <ClCompile Include="third_party\imgui\imgui_draw.cpp" />
+    <ClCompile Include="third_party\imgui\imgui_tables.cpp" />
+    <ClCompile Include="third_party\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="third_party\imgui\backends\imgui_impl_win32.cpp" />
+    <ClCompile Include="third_party\imgui\backends\imgui_impl_dx9.cpp" />
+    <ClInclude Include="src\CheckerLog.h" />
+    <ClInclude Include="src\EngineProbe.h" />
+    <ClInclude Include="src\GfxListReader.h" />
+    <ClInclude Include="src\OrbitCamera.h" />
+    <ClInclude Include="src\PreviewOverlay.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CopyRuntimeLibraries" AfterTargets="Build">
+    <ItemGroup>
+      <RuntimeDll Include="$(ClientSourceRoot)\$(Platform)\$(Configuration)\FTDriver.dll" />
+      <RuntimeDll Include="$(ClientSourceRoot)\$(Platform)\$(Configuration)\ImmWrapper.dll" />
+      <RuntimeDll Include="$(ClientSourceRoot)\$(Platform)\$(Configuration)\SpeedTreeRT.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(RuntimeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

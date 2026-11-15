@@ -1,0 +1,11 @@
+/bin/
+/build/
+/out/
+/.vs/
+*.user
+*.suo
+*.log
+*.obj
+*.pch
+*.pdb
+__pycache__/
