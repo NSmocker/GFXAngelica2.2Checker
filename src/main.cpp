@@ -10,6 +10,7 @@
 #include <locale.h>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -57,10 +58,13 @@ void PrintHelp()
               "  GFXAngelica2.2Checker.exe --list <gfx-list.txt> [--root <asset-directory>]\n"
               "  GFXAngelica2.2Checker.exe --self-test --root <asset-directory>\n"
               "  GFXAngelica2.2Checker.exe --preview --root <asset-directory> --gfx <relative-or-full-gfx-path> [--output preview.png] [--width 512] [--height 512] [--frames 10]\n"
+              "  GFXAngelica2.2Checker.exe --frames-out <directory> --root <asset-directory> --gfx <relative-or-full-gfx-path> [--width 512] [--height 512] [--times 100,200,...]\n"
               "  GFXAngelica2.2Checker.exe --interactive --root <asset-directory> --gfx <relative-or-full-gfx-path> [--width 512] [--height 512]\n\n"
               "Self-test validates AFI and library construction without creating a render device.\n"
               "Preview mode initializes a hidden A3DEngine viewport, renders one GFX effect to a PNG, and exits.\n"
               "The default PNG path is preview.png in the current directory; relative --output paths use that directory.\n"
+              "Frames-out mode renders one PNG per --times point (internal gfx time, ms); the render target is\n"
+              "cleared before every frame; camera.json and effect.json are written beside the PNGs.\n"
               "Interactive mode: middle mouse drag orbits the effect; W zooms in, S zooms out, Esc exits.\n"
               "The ImGui panel shows GFX statistics; Frame effect resets the orbit camera.\n"
               "Drop one .gfx from the asset root's gfx directory onto the interactive window to replace the current effect.\n"
@@ -188,6 +192,8 @@ int wmain(int argc, wchar_t* argv[])
     std::wstring gfxPath;
     std::wstring outputPath;
     std::wstring listPath;
+    std::wstring timesText;
+    std::wstring framesDirectory;
     unsigned width = 512;
     unsigned height = 512;
     unsigned frames = 10;
@@ -227,6 +233,12 @@ int wmain(int argc, wchar_t* argv[])
             frames = static_cast<unsigned>(std::stoul(argv[++i]));
             framesSpecified = true;
         }
+        else if (argument == L"--frames-out" && framesDirectory.empty() && i + 1 < argc &&
+                 argv[i + 1][0] != L'\0' && argv[i + 1][0] != L'-')
+            framesDirectory = NormalizeCommandLinePath(argv[++i]);
+        else if (argument == L"--times" && timesText.empty() && i + 1 < argc &&
+                 argv[i + 1][0] != L'\0' && argv[i + 1][0] != L'-')
+            timesText = NormalizeCommandLinePath(argv[++i]);
         else
         {
             std::fputs("Invalid, duplicate or unsupported argument. Use --help.\n", stderr);
@@ -255,6 +267,98 @@ int wmain(int argc, wchar_t* argv[])
     {
         std::fputs("--preview and --interactive are mutually exclusive.\n", stderr);
         return 2;
+    }
+
+    if (!framesDirectory.empty())
+    {
+        if (preview || interactive)
+        {
+            std::fputs("--frames-out is mutually exclusive with --preview and --interactive.\n", stderr);
+            return 2;
+        }
+        if (root.empty() || gfxPath.empty())
+        {
+            std::fputs("Frames-out mode requires --root <asset-directory> and --gfx <path>. Use --help.\n", stderr);
+            return 2;
+        }
+        if (!outputPath.empty() || framesSpecified)
+        {
+            std::fputs("--output and --frames are only valid with --preview.\n", stderr);
+            return 2;
+        }
+
+        // Часові точки: внутрішній час GFX у мілісекундах, розділені комами.
+        std::vector<unsigned> timePoints;
+        if (timesText.empty())
+        {
+            for (unsigned point = 100; point <= 1000; point += 100)
+                timePoints.push_back(point);
+        }
+        else
+        {
+            try
+            {
+                std::size_t begin = 0;
+                while (begin <= timesText.size())
+                {
+                    const std::size_t end = timesText.find(L',', begin);
+                    const std::wstring token = end == std::wstring::npos
+                        ? timesText.substr(begin)
+                        : timesText.substr(begin, end - begin);
+                    if (!token.empty())
+                        timePoints.push_back(static_cast<unsigned>(std::stoul(token)));
+                    if (end == std::wstring::npos)
+                        break;
+                    begin = end + 1;
+                }
+            }
+            catch (const std::exception&)
+            {
+                std::fputs("Error: --times expects a comma-separated list of integers (ms).\n", stderr);
+                return 2;
+            }
+        }
+        if (timePoints.empty())
+        {
+            std::fputs("Error: --times produced no time points.\n", stderr);
+            return 2;
+        }
+        std::sort(timePoints.begin(), timePoints.end());
+
+        const DWORD attributes = GetFileAttributesW(framesDirectory.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        {
+            std::fputs("Error: --frames-out directory does not exist; create it first.\n", stderr);
+            return 2;
+        }
+        if (!(attributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            std::fputs("Error: --frames-out must be a directory.\n", stderr);
+            return 2;
+        }
+
+        try
+        {
+            CheckerLog log(GetExecutableDirectory());
+            SetUnhandledExceptionFilter(LogUnhandledException);
+            try
+            {
+                RunGfxFrameCapture(ToSystemAnsi(ValidateAssetRoot(root)), ToSystemAnsi(gfxPath),
+                                   framesDirectory, width, height, timePoints);
+                std::puts("Frame capture completed successfully.");
+                return 0;
+            }
+            catch (const std::exception& error)
+            {
+                a_LogOutput(1, "%s", error.what());
+                throw;
+            }
+        }
+        catch (const std::exception& error)
+        {
+            std::fprintf(stderr, "Error: %s\n", error.what());
+            return 1;
+        }
     }
 
     if (preview || interactive)

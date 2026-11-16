@@ -25,6 +25,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cwchar>
 #include <limits>
 #include <memory>
@@ -86,7 +87,7 @@ class RenderTargetBinding
 {
 public:
     RenderTargetBinding(A3DDevice* device, A3DRenderTarget* renderTarget)
-        : m_device(device)
+        : m_device(device), m_renderTarget(renderTarget)
     {
         if (!m_device->SetRenderTarget(renderTarget))
             throw std::runtime_error("A3DDevice::SetRenderTarget failed.");
@@ -109,11 +110,23 @@ public:
         return true;
     }
 
+    // Повторна прив'язка для багатокадрового захоплення: між BeginRender/EndRender.
+    bool Rebind()
+    {
+        if (m_bound)
+            return true;
+        if (!m_device->SetRenderTarget(m_renderTarget))
+            return false;
+        m_bound = true;
+        return true;
+    }
+
     RenderTargetBinding(const RenderTargetBinding&) = delete;
     RenderTargetBinding& operator=(const RenderTargetBinding&) = delete;
 
 private:
     A3DDevice* m_device;
+    A3DRenderTarget* m_renderTarget;
     bool m_bound = false;
 };
 
@@ -1061,6 +1074,396 @@ void RunGfxPreview(const std::string& assetRoot,
 
         gfx.reset();
         a_LogOutput(0, "Preview successful for %s", relativePath.c_str());
+    }
+    catch (...)
+    {
+        AfxSetA3DCamera(nullptr);
+        gfxManager = nullptr;
+        AfxSetA3DDevice(nullptr);
+        DestroyWindow(hwnd);
+        throw;
+    }
+
+    AfxSetA3DCamera(nullptr);
+    gfxManager = nullptr;
+    AfxSetA3DDevice(nullptr);
+    DestroyWindow(hwnd);
+}
+
+// ================= Покадровий захоплювач (перевірка C++ ↔ Unity) =================
+
+namespace
+{
+// GBK → UTF-8: у camera.json/effect.json шляхи ассетів зберігаються як UTF-8.
+std::string GbkToUtf8(const std::string& gbk)
+{
+    if (gbk.empty())
+        return {};
+    const int wideLength = MultiByteToWideChar(936, 0, gbk.c_str(), static_cast<int>(gbk.size()), nullptr, 0);
+    if (wideLength <= 0)
+        return {};
+    std::wstring wide(static_cast<size_t>(wideLength), L'\0');
+    MultiByteToWideChar(936, 0, gbk.c_str(), static_cast<int>(gbk.size()), wide.data(), wideLength);
+    const int utf8Length = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), wideLength, nullptr, 0, nullptr, nullptr);
+    if (utf8Length <= 0)
+        return {};
+    std::string utf8(static_cast<size_t>(utf8Length), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), wideLength, utf8.data(), utf8Length, nullptr, nullptr);
+    return utf8;
+}
+
+// Мінімальний JSON-рядок: лапки, зворотні косі риски та контрольні символи.
+std::string JsonString(const std::string& utf8)
+{
+    std::string out = "\"";
+    for (const unsigned char c : utf8)
+    {
+        switch (c)
+        {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (c < 0x20)
+            {
+                char buffer[7];
+                std::snprintf(buffer, sizeof(buffer), "\\u%04X", c);
+                out += buffer;
+            }
+            else
+            {
+                out += static_cast<char>(c);
+            }
+        }
+    }
+    out += '"';
+    return out;
+}
+
+std::string JsonBool(bool value) { return value ? "true" : "false"; }
+
+// Тривалість елемента за правилом планувальника Unity (GfxRuntimePlan.FillTiming):
+// StartTime + сума додатних TimeSpan ключових точок; TimeSpan<0 — endless;
+// якщо старт >= сумарного часу і немає endless — старт + 3000.
+// Джерела полів: A3DGFXElement.h:652-664 (GetTimeStart, GetKeyPoint),
+// A3DGFXKeyPoint.h:686 (GetTimeSpan, мс).
+unsigned ElementTotalTimeMs(A3DGFXElement& element, bool& endless)
+{
+    DWORD start = element.GetTimeStart();
+    DWORD total = start;
+    endless = false;
+    for (int i = 0; i < element.GetKeyPointCount(); ++i)
+    {
+        A3DGFXKeyPoint* keyPoint = element.GetKeyPoint(i);
+        if (!keyPoint)
+            continue;
+        const DWORD span = keyPoint->GetTimeSpan();
+        if (static_cast<int>(span) < 0)
+            endless = true;
+        else
+            total += span;
+    }
+    if (total <= start && !endless)
+        total = start + 3000;
+    return endless ? 0 : total;
+}
+
+AString WriteUtf8File(const std::wstring& path, const std::string& content)
+{
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return AString("CreateFile failed for frame capture metadata.");
+    DWORD written = 0;
+    const BOOL ok = WriteFile(file, content.data(), static_cast<DWORD>(content.size()), &written, nullptr);
+    CloseHandle(file);
+    if (!ok)
+        return AString("WriteFile failed for frame capture metadata.");
+    return AString();
+}
+} // namespace
+
+void RunGfxFrameCapture(const std::string& assetRoot,
+                        const std::string& gfxPath,
+                        const std::wstring& framesDirectory,
+                        unsigned width,
+                        unsigned height,
+                        const std::vector<unsigned>& timePointsMs)
+{
+    if (width == 0 || height == 0)
+        throw std::runtime_error("Frame capture resolution must be non-zero.");
+    if (timePointsMs.empty())
+        throw std::runtime_error("Frame capture requires at least one time point.");
+
+    FileModule files(assetRoot);
+    WorkingDirectory workingDirectory(assetRoot);
+    a_LogOutput(0, "Starting frame capture for %s", gfxPath.c_str());
+
+    const std::string relativePath = ResolveGfxRelativePath(assetRoot, gfxPath);
+    const HWND hwnd = CreateHiddenPreviewWindow(width, height);
+    if (!hwnd)
+        throw std::runtime_error("Failed to create hidden window for frame capture.");
+    a_LogOutput(0, "Created hidden window for frame capture.");
+
+    try
+    {
+        A3DDEVFMT devFmt;
+        devFmt.bWindowed = true;
+        devFmt.nWidth = static_cast<int>(width);
+        devFmt.nHeight = static_cast<int>(height);
+        devFmt.fmtAdapter = A3DFMT_A8R8G8B8;
+        devFmt.fmtTarget = A3DFMT_A8R8G8B8;
+        devFmt.fmtDepth = A3DFMT_D24X8;
+        devFmt.bVSync = false;
+        devFmt.bSndGlobal = false;
+
+        auto engine = std::make_unique<A3DEngine>();
+        if (!engine->Init(GetModuleHandleA(nullptr), hwnd, &devFmt, A3DDEV_ALLOWMULTITHREAD))
+            throw std::runtime_error("A3DEngine::Init failed for frame capture mode.");
+        a_LogOutput(0, "A3DEngine initialized for frame capture.");
+
+        if (!g_pA3DConfig)
+            throw std::runtime_error("A3D runtime configuration is unavailable.");
+        g_pA3DConfig->RT_SetShowFPSFlag(false);
+
+        A3DDevice* device = engine->GetA3DDevice();
+        if (!device)
+            throw std::runtime_error("A3DEngine created without a device.");
+        AfxSetA3DDevice(device);
+
+        A3DLightMan* lightMan = engine->GetA3DLightMan();
+        if (!lightMan)
+            throw std::runtime_error("A3DLightMan unavailable for frame capture scene.");
+        A3DLight* dirLight = nullptr;
+        if (!lightMan->CreateDirecionalLight(0, &dirLight,
+                                            A3DVECTOR3(0.0f, 120.0f, 0.0f),
+                                            A3DVECTOR3(0.0f, -1.0f, -1.0f),
+                                            A3DCOLORVALUE(1.0f, 1.0f, 1.0f, 1.0f),
+                                            A3DCOLORVALUE(0.8f, 0.8f, 0.8f, 1.0f),
+                                            A3DCOLORVALUE(0.2f, 0.2f, 0.2f, 1.0f)))
+            throw std::runtime_error("Directional light creation failed.");
+
+        A3DSkinMan* skinMan = engine->GetA3DSkinMan();
+        if (!skinMan)
+            throw std::runtime_error("A3DSkinMan unavailable for frame capture scene.");
+        skinMan->SetDirLight(dirLight);
+        if (!skinMan->LoadSkinModelVertexShaders("Configs\\2.2\\skinmodelvs.cfg"))
+            a_LogOutput(1, "Warning: configs\\2.2\\skinmodelvs.cfg was not available; preview may not render skinned models.");
+
+        A3DVIEWPORTPARAM viewportParam{};
+        viewportParam.X = 0;
+        viewportParam.Y = 0;
+        viewportParam.Width = static_cast<DWORD>(width);
+        viewportParam.Height = static_cast<DWORD>(height);
+        viewportParam.MinZ = 0.0f;
+        viewportParam.MaxZ = 1.0f;
+
+        A3DViewport viewport;
+        if (!viewport.Init(device, &viewportParam, true, true, 0xFF000000))
+            throw std::runtime_error("A3DViewport::Init failed for frame capture.");
+
+        A3DCamera camera;
+        // Near/far і FOV як у RunGfxPreview: EC_Game.cpp:1636-1637.
+        if (!camera.Init(device, DEG2RAD(65.0f), 0.2f, 2000.0f, static_cast<float>(width) / height))
+            throw std::runtime_error("A3DCamera::Init failed for frame capture.");
+
+        viewport.SetCamera(&camera);
+        engine->SetActiveCamera(&camera);
+        engine->SetActiveViewport(&viewport);
+        AfxSetA3DCamera(&camera);
+
+        std::unique_ptr<A3DGFXExMan, GfxManagerDeleter> gfxManagerLocal(new A3DGFXExMan());
+        gfxManager = gfxManagerLocal.get();
+        if (!gfxManagerLocal->Init(device))
+            throw std::runtime_error("A3DGFXExMan::Init failed for frame capture.");
+
+        const AString relativePathString(relativePath.c_str());
+        std::unique_ptr<A3DGFXEx, GfxDeleter> gfx(
+            gfxManagerLocal->LoadGfx(device, relativePathString, false, false));
+        if (!gfx)
+            throw std::runtime_error("Failed to load GFX: " + relativePath);
+        if (!gfx->Start())
+            throw std::runtime_error("A3DGFXEx::Start failed for: " + relativePath);
+
+        Position2DEffect(*gfx, viewport);
+        ConfigureCameraFromAabb(camera, gfx.get());
+        const auto& bounds = gfx->GetAABBOrg();
+
+        // Тривалість: максимум за елементами, той самий діалог, що у Unity-планувальника.
+        bool anyEndless = false;
+        unsigned totalMs = 0;
+        for (int i = 0; i < gfx->GetElementCount(); ++i)
+        {
+            A3DGFXElement* element = gfx->GetElement(i);
+            if (!element)
+                continue;
+            bool endless = false;
+            const unsigned total = ElementTotalTimeMs(*element, endless);
+            anyEndless = anyEndless || endless;
+            totalMs = (std::max)(totalMs, total);
+        }
+        // Endless-елементи: як у Unity (default 3000; <= start → start+3000 уже застосовано
+        // для не-endless; endless не збільшує суму). Якщо все ж 0 — страховка.
+        if (totalMs == 0)
+            totalMs = 3000;
+
+        float actualSpeed = gfx->GetPlaySpeed() * gfx->GetDefPlaySpeed();
+        if (!std::isfinite(actualSpeed) || std::fabs(actualSpeed) < 0.001f)
+        {
+            a_LogOutput(1, "Warning: PlaySpeed %.4f is not usable; capture uses 1.0.", actualSpeed);
+            actualSpeed = 1.0f;
+        }
+
+        std::vector<unsigned> targets = timePointsMs;
+        const unsigned maxTarget = targets.back();
+        if (maxTarget > totalMs)
+        {
+            // Масштабуємо сітку часів до тривалості конкретного ефекту.
+            for (unsigned& t : targets)
+                t = static_cast<unsigned>(static_cast<unsigned long long>(t) * totalMs / maxTarget);
+            // Дедуплікація з сортуванням.
+            std::sort(targets.begin(), targets.end());
+            targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+        }
+        if (targets.size() != timePointsMs.size())
+            a_LogOutput(1, "Warning: time points deduplicated from %zu to %zu.", timePointsMs.size(), targets.size());
+
+        a_LogOutput(0, "Frame capture plan: elements=%d total_ms=%u speed=%.4f points=%zu",
+                    gfx->GetElementCount(), totalMs, actualSpeed, targets.size());
+
+        A3DDEVFMT renderTargetFormat = device->GetDevFormat();
+        renderTargetFormat.nWidth = static_cast<int>(width);
+        renderTargetFormat.nHeight = static_cast<int>(height);
+        renderTargetFormat.fmtTarget = A3DFMT_A8R8G8B8;
+        renderTargetFormat.fmtDepth = A3DFMT_D24X8;
+
+        std::unique_ptr<A3DRenderTarget, RenderTargetDeleter> renderTarget(new A3DRenderTarget());
+        if (!renderTarget->Init(device, renderTargetFormat, true, false))
+            throw std::runtime_error("A3DRenderTarget::Init failed for frame capture.");
+
+        if (!engine->BeginRender())
+            throw std::runtime_error("A3DEngine::BeginRender failed during frame capture.");
+        RenderTargetBinding renderTargetBinding(device, renderTarget.get());
+        viewport.Active();
+
+        DWORD previous = 0;
+        std::string framesJson = "[";
+        for (size_t i = 0; i < targets.size(); ++i)
+        {
+            const unsigned target = targets[i];
+            DWORD wall = target >= previous
+                ? static_cast<DWORD>(static_cast<unsigned long long>(target - previous) / actualSpeed)
+                : 0;
+            previous = target;
+            // TickAnimation множить на швидкість: подаємо настінний час, щоб
+            // внутрішній час точно досяг цілі. Чанки до 4000 мс.
+            while (wall > 0)
+            {
+                const DWORD chunk = wall > 4000 ? 4000 : wall;
+                gfx->TickAnimation(chunk);
+                wall -= chunk;
+            }
+            if (!viewport.ClearDevice())
+                throw std::runtime_error("A3DViewport::ClearDevice failed during frame capture.");
+
+            A3DGFXExMan::ResetStatCount();
+            RenderPreviewGfx(*gfxManagerLocal, *gfx, viewport);
+            if (!engine->EndRender())
+                throw std::runtime_error("A3DEngine::EndRender failed during frame capture.");
+            if (!renderTargetBinding.Restore())
+                throw std::runtime_error("A3DDevice::RestoreRenderTarget failed during frame capture.");
+
+            wchar_t framePath[MAX_PATH];
+            if (_snwprintf(framePath, MAX_PATH, L"%s\\frame-%02zu.png", framesDirectory.c_str(), i + 1) >= MAX_PATH)
+                throw std::runtime_error("Frame output path is too long.");
+            SaveRenderTargetAsPng(device, renderTarget.get(), framePath);
+            a_LogOutput(0, "Frame capture: index=%zu time_ms=%u draws=%d primitives=%d particles=%d state=%d",
+                        i + 1, target, A3DGFXExMan::GetTotalDrawCount(), A3DGFXExMan::GetTotalPrimCount(),
+                        A3DGFXExMan::GetParticleRenderCount(), gfx->GetState());
+            char frameLine[512];
+            std::snprintf(frameLine, sizeof(frameLine),
+                          "{\"index\":%zu,\"time_ms\":%u,\"draws\":%d,\"primitives\":%d,\"particles\":%d,\"state\":%d,\"elements\":%d}%s",
+                          i + 1, target, A3DGFXExMan::GetTotalDrawCount(), A3DGFXExMan::GetTotalPrimCount(),
+                          A3DGFXExMan::GetParticleRenderCount(), gfx->GetState(), gfx->GetElementCount(),
+                          i + 1 < targets.size() ? "," : "");
+            framesJson += frameLine;
+
+            if (i + 1 < targets.size())
+            {
+                // Наступний кадр: повний цикл BEGIN → прив'язка RT → clear → render.
+                if (!engine->BeginRender())
+                    throw std::runtime_error("A3DEngine::BeginRender failed between frames.");
+                if (!renderTargetBinding.Rebind())
+                    throw std::runtime_error("A3DDevice::SetRenderTarget failed between frames.");
+                viewport.Active();
+            }
+        }
+
+        // ---- camera.json ----
+        const A3DVECTOR3 eye = camera.GetPos();
+        const A3DVECTOR3 center = (bounds.Mins + bounds.Maxs) * (0.5f * gfx->GetActualScale()) + gfx->GetPos();
+        char buffer[1024];
+        std::string cameraJson = "{";
+        std::snprintf(buffer, sizeof(buffer), "\"eye\":[%.6f,%.6f,%.6f]", eye.x, eye.y, eye.z);
+        cameraJson += buffer;
+        std::snprintf(buffer, sizeof(buffer), ",\"target\":[%.6f,%.6f,%.6f]", center.x, center.y, center.z);
+        cameraJson += buffer;
+        cameraJson += ",\"up\":[0,1,0]";
+        std::snprintf(buffer, sizeof(buffer), ",\"fov_deg\":%.3f", 65.0f);
+        cameraJson += buffer;
+        std::snprintf(buffer, sizeof(buffer), ",\"near\":%.4f,\"far\":%.1f,\"aspect\":%.6f",
+                      camera.GetZFront(), camera.GetZBack(), static_cast<float>(width) / height);
+        cameraJson += buffer;
+        cameraJson += "}";
+        WriteUtf8File(framesDirectory + L"\\camera.json", cameraJson);
+
+        // ---- effect.json ----
+        std::string effectJson = "{";
+        effectJson += "\"gfx\":" + JsonString(GbkToUtf8(relativePath)) + ",";
+        std::snprintf(buffer, sizeof(buffer),
+                      "\"total_ms\":%u,\"any_endless\":%s,\"play_speed\":%.6f,\"def_play_speed\":%.6f,\"actual_speed\":%.6f,"
+                      "\"scale\":%.6f,\"alpha\":%.3f,\"is_2d\":%s,\"element_count\":%d,\"time_points\":[",
+                      totalMs, JsonBool(anyEndless).c_str(), gfx->GetPlaySpeed(), gfx->GetDefPlaySpeed(), actualSpeed,
+                      gfx->GetActualScale(), gfx->GetActualAlpha(), JsonBool(gfx->Is2DRender()).c_str(),
+                      gfx->GetElementCount());
+        effectJson += buffer;
+        for (size_t i = 0; i < targets.size(); ++i)
+        {
+            std::snprintf(buffer, sizeof(buffer), "%s%u", i ? "," : "", targets[i]);
+            effectJson += buffer;
+        }
+        effectJson += "],\"aabb_min\":[";
+        std::snprintf(buffer, sizeof(buffer), "%.6f,%.6f,%.6f", bounds.Mins.x, bounds.Mins.y, bounds.Mins.z);
+        effectJson += buffer;
+        effectJson += "],\"aabb_max\":[";
+        std::snprintf(buffer, sizeof(buffer), "%.6f,%.6f,%.6f", bounds.Maxs.x, bounds.Maxs.y, bounds.Maxs.z);
+        effectJson += buffer;
+        effectJson += "],\"frames\":" + framesJson + "],\"elements\":[";
+        for (int i = 0; i < gfx->GetElementCount(); ++i)
+        {
+            A3DGFXElement* element = gfx->GetElement(i);
+            if (!element)
+                continue;
+            bool endless = false;
+            const unsigned elementTotal = ElementTotalTimeMs(*element, endless);
+            std::snprintf(buffer, sizeof(buffer),
+                          "%s{\"index\":%d,\"type\":%d,\"init\":%d,\"active\":%d,\"dummy\":%d,"
+                          "\"keypoints\":%d,\"start_ms\":%lu,\"total_ms\":%u,\"endless\":%s,\"tex\":",
+                          i ? "," : "", i, element->GetEleTypeId(), element->IsInit(), element->IsActive(),
+                          element->IsDummyEle(), element->GetKeyPointCount(),
+                          static_cast<unsigned long>(element->GetTimeStart()), elementTotal,
+                          JsonBool(endless).c_str());
+            effectJson += buffer;
+            effectJson += JsonString(GbkToUtf8(static_cast<const char*>(element->GetTexPath())));
+            effectJson += "}";
+        }
+        effectJson += "]}";
+        WriteUtf8File(framesDirectory + L"\\effect.json", effectJson);
+
+        gfx.reset();
+        a_LogOutput(0, "Frame capture successful for %s (%zu frames).", relativePath.c_str(), targets.size());
     }
     catch (...)
     {
